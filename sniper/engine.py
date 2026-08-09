@@ -55,7 +55,12 @@ async def execute_sell(pos_id: int, fraction: float, reason: str):
     real_pnl = max(real_pnl, -1.0)
 
     thin = spot_pnl > 0 and (spot_pnl - real_pnl) > 0.30
-    left = max(pos["tokens_left"] - sold, 0)
+    # Full exit (fraction~1): sisa 0. Partial: kurangi DB, jangan negatif.
+    if fraction >= 0.999:
+        left = 0.0
+    else:
+        left = max(float(pos["tokens_left"] or 0) - sold, 0.0)
+
     tag = f"{pos['symbol']} (`{pos['ca'][:10]}…`)"
     nums = (f"layar {spot_pnl*100:+.1f}% → **realized {real_pnl*100:+.1f}%**\n"
             f"{sold:,.0f} token → **{eth_real:.6f} ETH** masuk · gas {gas_eth:.6f} {_txlink(swap_tx)}")
@@ -179,12 +184,18 @@ async def _check(pos):
         if pnl >= tp2_v and db.get("tp2_on", str) == "1":
             if verify:
                 ep = await asyncio.to_thread(_trader.exec_pnl, pos, 1.0)
+                # ep < 0 = quote gagal (dulu sering muncur sebagai 'STF' palsu)
                 if ep < tp2_v * 0.7:
                     if pos["id"] not in _thin_warned:
                         _thin_warned.add(pos["id"])
-                        await _notify(
-                            f"🫧 **{pos['symbol']}** layar {pnl*100:+.0f}% tapi hasil jual asli "
-                            f"cuma {ep*100:+.0f}% (pool tipis) — TP2 ditahan, tunggu depth")
+                        if ep < 0:
+                            await _notify(
+                                f"🫧 **{pos['symbol']}** layar {pnl*100:+.0f}% tapi quote jual "
+                                f"gagal/pool tidak cukup depth — TP2 ditahan, coba lagi")
+                        else:
+                            await _notify(
+                                f"🫧 **{pos['symbol']}** layar {pnl*100:+.0f}% tapi hasil jual asli "
+                                f"cuma {ep*100:+.0f}% (pool tipis) — TP2 ditahan, tunggu depth")
                     return
             _cleanup(pos["id"])
             await _notify(await execute_sell(pos["id"], 1.0, "tp2"))
@@ -195,14 +206,24 @@ async def _check(pos):
                 if ep < tp1_v * 0.7:
                     if pos["id"] not in _thin_warned:
                         _thin_warned.add(pos["id"])
-                        await _notify(
-                            f"🫧 **{pos['symbol']}** layar {pnl*100:+.0f}% tapi hasil jual asli "
-                            f"cuma {ep*100:+.0f}% (pool tipis) — TP1 ditahan, tunggu depth")
+                        if ep < 0:
+                            await _notify(
+                                f"🫧 **{pos['symbol']}** layar {pnl*100:+.0f}% tapi quote jual "
+                                f"gagal/pool tidak cukup depth — TP1 ditahan, coba lagi")
+                        else:
+                            await _notify(
+                                f"🫧 **{pos['symbol']}** layar {pnl*100:+.0f}% tapi hasil jual asli "
+                                f"cuma {ep*100:+.0f}% (pool tipis) — TP1 ditahan, tunggu depth")
                     return
             _thin_warned.discard(pos["id"])
             await _notify(await execute_sell(pos["id"], frac, "tp1"))
     except Exception as e:
-        await _notify(f"⚠️ Gagal eksekusi sell {pos['symbol']}: {e}")
+        err = str(e)
+        hint = ""
+        if "STF" in err:
+            hint = ("\n_STF = transferFrom gagal (saldo/allowance/amount). "
+                    "Biasanya float amount > balance atau race sell ganda._")
+        await _notify(f"⚠️ Gagal eksekusi sell {pos['symbol']}: {e}{hint}")
 
 
 def _cleanup(pid):
